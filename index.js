@@ -140,6 +140,15 @@ app.get("/services", async (req, res) => {
   const result = await cursor.toArray();
   res.send(result);
 });
+
+// একটি নির্দিষ্ট সার্ভিস পাওয়া
+app.get("/services/:id", async (req, res) => {
+  const id = req.params.id;
+  const query = { _id: new ObjectId(id) };
+  const result = await services.findOne(query);
+  res.send(result);
+});
+
 // সার্ভিস আপডেট
 app.patch("/services/:id", async (req, res) => {
   const id = req.params.id;
