@@ -12,7 +12,15 @@ const app = express();
 
 const port = process.env.PORT || 8000;
 
-app.use(express.json());
+app.use(
+  express.json({
+    verify(req, res, buffer) {
+      if (req.originalUrl === "/webhooks/stripe") {
+        req.rawBody = buffer;
+      }
+    },
+  }),
+);
 app.use(cors());
 
 //
@@ -36,7 +44,7 @@ const db = client.db("StyleSync");
 const services = db.collection("services");
 const bookings = db.collection("bookings");
 const users = db.collection("user");
-const sessions = db.collection("sessions");
+const sessions = db.collection("session");
 const payments = db.collection("payments");
 
 // ডাবল বুকিং আটকানোর জন্যা
@@ -82,6 +90,103 @@ await bookings.createIndex(
   },
 );
 
+app.post("/webhooks/stripe", async (req, res) => {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const signature = req.headers["stripe-signature"];
+
+  if (!stripe || !webhookSecret) {
+    res.status(503).send({ message: "Stripe webhook is not configured" });
+    return;
+  }
+  if (typeof signature !== "string" || !req.rawBody) {
+    res.status(400).send({ message: "Invalid Stripe webhook request" });
+    return;
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.rawBody,
+      signature,
+      webhookSecret,
+    );
+  } catch (error) {
+    console.error("Stripe webhook signature verification failed:", error);
+    res.status(400).send({ message: "Invalid Stripe signature" });
+    return;
+  }
+
+  if (event.type !== "checkout.session.completed") {
+    res.send({ received: true });
+    return;
+  }
+
+  const checkoutSession = event.data.object;
+  const bookingId = checkoutSession.metadata?.bookingId;
+  const userId = checkoutSession.metadata?.userId;
+
+  if (
+    checkoutSession.payment_status !== "paid" ||
+    typeof bookingId !== "string" ||
+    typeof userId !== "string" ||
+    !ObjectId.isValid(bookingId) ||
+    !ObjectId.isValid(userId)
+  ) {
+    res.send({ received: true });
+    return;
+  }
+
+  const bookingQuery = {
+    _id: new ObjectId(bookingId),
+    userId,
+    status: "Confirmed",
+  };
+  const booking = await bookings.findOne(bookingQuery);
+  if (!booking) {
+    console.error("Paid Stripe session has no matching confirmed booking", {
+      bookingId,
+      sessionId: checkoutSession.id,
+    });
+    res.status(500).send({ message: "Could not match payment to booking" });
+    return;
+  }
+
+  const paymentRecord = {
+    sessionId: checkoutSession.id,
+    status: checkoutSession.status,
+    customer_email:
+      checkoutSession.customer_details?.email ??
+      checkoutSession.customer_email,
+    userId,
+    payment_intent:
+      typeof checkoutSession.payment_intent === "string"
+        ? checkoutSession.payment_intent
+        : checkoutSession.payment_intent?.id,
+    payment_status: checkoutSession.payment_status,
+    amount_total: checkoutSession.amount_total,
+    currency: checkoutSession.currency,
+    payment_date: new Date(),
+    bookingId,
+  };
+
+  try {
+    await payments.updateOne(
+      { sessionId: checkoutSession.id },
+      { $setOnInsert: paymentRecord },
+      { upsert: true },
+    );
+  } catch (error) {
+    if (error?.code !== 11000) {
+      throw error;
+    }
+  }
+
+  await bookings.updateOne(bookingQuery, {
+    $set: { paymentStatus: "Paid" },
+  });
+  res.send({ received: true });
+});
+
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) {
@@ -124,8 +229,10 @@ const verifyToken = async (req, res, next) => {
   req.user = user;
   next();
 };
+const isCustomerRole = (role) =>
+  role === "customer" || role === "user";
 const verifyCustomer = async (req, res, next) => {
-  if (req.user?.role?.toLowerCase() !== "customer") {
+  if (!isCustomerRole(req.user?.role?.toLowerCase())) {
     res.status(403).send({ message: "Forbidden" });
     return;
   }
@@ -142,7 +249,7 @@ const verifyAdmin = async (req, res, next) => {
 
 const verifyCustomerOrAdmin = async (req, res, next) => {
   const role = req.user?.role?.toLowerCase();
-  if (role !== "customer" && role !== "admin") {
+  if (!isCustomerRole(role) && role !== "admin") {
     res.status(403).send({ message: "Forbidden" });
     return;
   }
@@ -282,6 +389,15 @@ const serviceFields = [
   "status",
   "image",
 ];
+const serviceCategories = new Set([
+  "Haircut & Styling",
+  "Hair Coloring",
+  "Hair Treatment",
+  "Facial & Skincare",
+  "Makeup",
+  "Manicure & Pedicure",
+  "Spa & Massage",
+]);
 
 function getServiceInput(body, isUpdate = false) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -301,6 +417,9 @@ function getServiceInput(body, isUpdate = false) {
       (typeof body.price !== "number" ||
         !Number.isFinite(body.price) ||
         body.price <= 0)) ||
+    ("category" in body &&
+      (typeof body.category !== "string" ||
+        !serviceCategories.has(body.category.trim()))) ||
     ("duration" in body &&
       (!Number.isInteger(body.duration) || body.duration <= 0)) ||
     ("status" in body && !["Active", "Inactive"].includes(body.status)) ||
@@ -340,6 +459,11 @@ app.post("/add-service", verifyToken, verifyAdmin, async (req, res) => {
 app.get("/services", async (req, res) => {
   const cursor = services.find({ status: "Active" });
   const result = await cursor.toArray();
+  res.send(result);
+});
+
+app.get("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
+  const result = await services.find({}).toArray();
   res.send(result);
 });
 
