@@ -3,6 +3,7 @@ import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import Stripe from "stripe";
+import jwt from "jsonwebtoken";
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -187,6 +188,15 @@ app.post("/webhooks/stripe", async (req, res) => {
   res.send({ received: true });
 });
 
+// jwt create api
+app.post("/jwt", async (req, res) => {
+  const user = req.body;
+  const secret = process.env.JWT_SECRET || "stylesync_jwt_secret_key_2026";
+  const token = jwt.sign(user, secret, { expiresIn: "7d" });
+  res.send({ token });
+});
+
+// jwt and session verification middleware
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) {
@@ -201,6 +211,41 @@ const verifyToken = async (req, res, next) => {
     return;
   }
 
+  // Check if token is a JWT
+  const isJwt = token.split(".").length === 3;
+  if (isJwt) {
+    const secret = process.env.JWT_SECRET || "stylesync_jwt_secret_key_2026";
+    jwt.verify(token, secret, async (err, decoded) => {
+      if (err) {
+        res.status(401).send({ message: "Unauthorized" });
+        return;
+      }
+
+      const userId = decoded.id || decoded._id || decoded.userId;
+      let user = null;
+      if (userId && ObjectId.isValid(userId)) {
+        user = await users.findOne({ _id: new ObjectId(userId) });
+      } else if (decoded.email) {
+        user = await users.findOne({ email: decoded.email });
+      }
+
+      if (!user) {
+        res.status(401).send({ message: "Unauthorized" });
+        return;
+      }
+
+      if (user.banned === true || user.isBlocked === true) {
+        res.status(403).send({ message: "Account is blocked" });
+        return;
+      }
+
+      req.user = user;
+      next();
+    });
+    return;
+  }
+
+  // Session token verification (Better Auth)
   const query = { token };
   const session = await sessions.findOne(query);
 
