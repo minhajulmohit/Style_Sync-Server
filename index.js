@@ -275,6 +275,7 @@ app.get("/", (req, res) => {
 
 const serviceFields = [
   "serviceName",
+  "category",
   "description",
   "price",
   "duration",
