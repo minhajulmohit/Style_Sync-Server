@@ -629,6 +629,12 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     return;
   }
 
+  const slotDateTime = new Date(`${date}T${time}:00`);
+  if (Number.isNaN(slotDateTime.getTime()) || slotDateTime.getTime() <= Date.now()) {
+    res.status(400).send({ message: "Cannot book an appointment in the past. Please select a future time." });
+    return;
+  }
+
   const existingBookings = await bookings
     .find({
       serviceId,
