@@ -2,9 +2,11 @@ import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
-// import Stripe from "stripe";
+import Stripe from "stripe";
 
-// const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
 
 const app = express();
 
@@ -24,39 +26,160 @@ export async function connectToMongoDB() {
     return client;
   } catch (err) {
     console.dir(err);
+    throw err;
   }
 }
 
-const connectToClient = await connectToMongoDB();
+await connectToMongoDB();
 
 const db = client.db("StyleSync");
 const services = db.collection("services");
 const bookings = db.collection("bookings");
+const users = db.collection("user");
+const sessions = db.collection("sessions");
+const payments = db.collection("payments");
 
 // ডাবল বুকিং আটকানোর জন্যা
+for (const indexName of [
+  "serviceId_1_date_1_time_1",
+  "serviceId_1_date_1_occupiedSlots_1",
+]) {
+  try {
+    await bookings.dropIndex(indexName);
+  } catch (error) {
+    if (error?.code !== 27) {
+      throw error;
+    }
+  }
+}
+
 await bookings.createIndex(
   { serviceId: 1, date: 1, time: 1 },
   {
+    name: "active_service_date_time",
     unique: true,
     partialFilterExpression: {
       serviceId: { $type: "string" },
       date: { $type: "string" },
       time: { $type: "string" },
+      status: { $in: ["Pending", "Confirmed"] },
     },
   },
 );
+await payments.createIndex({ sessionId: 1 }, { unique: true });
 
 await bookings.createIndex(
   { serviceId: 1, date: 1, occupiedSlots: 1 },
   {
+    name: "active_service_date_slots",
     unique: true,
     partialFilterExpression: {
       serviceId: { $type: "string" },
       date: { $type: "string" },
       occupiedSlots: { $type: "array" },
+      status: { $in: ["Pending", "Confirmed"] },
     },
   },
 );
+
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    res.status(401).send({ message: "Unauthorized" });
+
+    return;
+  }
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    res.status(401).send({ message: "Unauthorized" });
+
+    return;
+  }
+
+  const query = { token };
+  const session = await sessions.findOne(query);
+
+  if (!session) {
+    res.status(401).send({ message: "Unauthorized" });
+    return;
+  }
+  const userId = session.userId;
+  if (!ObjectId.isValid(userId)) {
+    res.status(401).send({ message: "Unauthorized" });
+    return;
+  }
+
+  const userQuery = { _id: new ObjectId(userId) };
+  const user = await users.findOne(userQuery);
+  if (!user) {
+    res.status(401).send({ message: "Unauthorized" });
+    return;
+  }
+
+  if (user.isBlocked === true) {
+    res.status(403).send({ message: "Account is blocked" });
+    return;
+  }
+
+  req.user = user;
+  next();
+};
+const verifyCustomer = async (req, res, next) => {
+  if (req.user?.role?.toLowerCase() !== "customer") {
+    res.status(403).send({ message: "Forbidden" });
+    return;
+  }
+  next();
+};
+
+const verifyAdmin = async (req, res, next) => {
+  if (req.user?.role?.toLowerCase() !== "admin") {
+    res.status(403).send({ message: "Forbidden" });
+    return;
+  }
+  next();
+};
+
+const verifyCustomerOrAdmin = async (req, res, next) => {
+  const role = req.user?.role?.toLowerCase();
+  if (role !== "customer" && role !== "admin") {
+    res.status(403).send({ message: "Forbidden" });
+    return;
+  }
+  next();
+};
+
+const getAuthenticatedUserId = (user) => user._id.toString();
+
+app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
+  const cursor = users.find({});
+  const result = await cursor.toArray();
+
+  res.send(result);
+});
+
+app.get("/users/:id/premium", verifyToken, async (req, res) => {
+  const id = req.params.id;
+  if (!ObjectId.isValid(id)) {
+    res.status(400).send({ message: "Invalid user ID" });
+    return;
+  }
+  if (
+    getAuthenticatedUserId(req.user) !== new ObjectId(id).toString() &&
+    req.user.role?.toLowerCase() !== "admin"
+  ) {
+    res.status(403).send({ message: "Forbidden" });
+    return;
+  }
+
+  const query = { _id: new ObjectId(id) };
+  const result = await users.findOne(query, { projection: { premium: 1 } });
+  if (!result) {
+    res.status(404).send({ message: "User not found" });
+    return;
+  }
+  res.send(result);
+});
 
 // Test
 app.get("/", (req, res) => {
@@ -150,19 +273,71 @@ app.get("/", (req, res) => {
 
 // services api
 
-// একটা সার্ভিস পোস্ট করার জন্য
-app.post("/add-service", async (req, res) => {
-  const service = req.body;
-  const result = await services.insertOne(service);
-  if (result.acknowledged) {
-    res.status(200).send({ message: "Service added to server" });
+const serviceFields = [
+  "serviceName",
+  "description",
+  "price",
+  "duration",
+  "status",
+  "image",
+];
+
+function getServiceInput(body, isUpdate = false) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return null;
   }
+
+  const keys = Object.keys(body);
+  if (keys.some((key) => !serviceFields.includes(key))) {
+    return null;
+  }
+
+  if (!isUpdate && (!("price" in body) || !("duration" in body))) {
+    return null;
+  }
+  if (
+    ("price" in body &&
+      (typeof body.price !== "number" ||
+        !Number.isFinite(body.price) ||
+        body.price <= 0)) ||
+    ("duration" in body &&
+      (!Number.isInteger(body.duration) || body.duration <= 0)) ||
+    ("status" in body && !["Active", "Inactive"].includes(body.status)) ||
+    ("serviceName" in body &&
+      (typeof body.serviceName !== "string" || !body.serviceName.trim())) ||
+    ("description" in body && typeof body.description !== "string") ||
+    ("image" in body && typeof body.image !== "string") ||
+    (isUpdate && keys.length === 0)
+  ) {
+    return null;
+  }
+
+  return Object.fromEntries(
+    Object.entries(body).map(([key, value]) => [
+      key,
+      typeof value === "string" ? value.trim() : value,
+    ]),
+  );
+}
+
+app.post("/add-service", verifyToken, verifyAdmin, async (req, res) => {
+  const serviceInput = getServiceInput(req.body);
+  if (!serviceInput) {
+    res.status(400).send({ message: "Invalid service details" });
+    return;
+  }
+
+  const service = {
+    ...serviceInput,
+    status: serviceInput.status ?? "Active",
+    adminId: getAuthenticatedUserId(req.user),
+  };
+  const result = await services.insertOne(service);
+  res.status(201).send({ insertedId: result.insertedId });
 });
 
-// সার্ভিস গুলো পাওয়ার জন্য
 app.get("/services", async (req, res) => {
-  const query = {};
-  const cursor = services.find(query);
+  const cursor = services.find({ status: "Active" });
   const result = await cursor.toArray();
   res.send(result);
 });
@@ -170,29 +345,57 @@ app.get("/services", async (req, res) => {
 // একটি নির্দিষ্ট সার্ভিস পাওয়া
 app.get("/services/:id", async (req, res) => {
   const id = req.params.id;
+  if (!ObjectId.isValid(id)) {
+    res.status(400).send({ message: "Invalid service ID" });
+    return;
+  }
+
   const query = { _id: new ObjectId(id) };
-  const result = await services.findOne(query);
+  const result = await services.findOne({ ...query, status: "Active" });
+  if (!result) {
+    res.status(404).send({ message: "Service not found" });
+    return;
+  }
   res.send(result);
 });
 
 // সার্ভিস আপডেট
-app.patch("/services/:id", async (req, res) => {
+app.patch("/services/:id", verifyToken, verifyAdmin, async (req, res) => {
   const id = req.params.id;
+  if (!ObjectId.isValid(id)) {
+    res.status(400).send({ message: "Invalid service ID" });
+    return;
+  }
+
+  const serviceInput = getServiceInput(req.body, true);
+  if (!serviceInput) {
+    res.status(400).send({ message: "Invalid service update" });
+    return;
+  }
+
   const query = { _id: new ObjectId(id) };
-  const updatedData = {
-    $set: req.body,
-  };
-
-  const result = await services.updateOne(query, updatedData);
-
+  const result = await services.updateOne(query, { $set: serviceInput });
+  if (result.matchedCount === 0) {
+    res.status(404).send({ message: "Service not found" });
+    return;
+  }
   res.send(result);
 });
 
 // সার্ভিস ডিলেট
-app.delete("/services/:id", async (req, res) => {
+app.delete("/services/:id", verifyToken, verifyAdmin, async (req, res) => {
   const id = req.params.id;
+  if (!ObjectId.isValid(id)) {
+    res.status(400).send({ message: "Invalid service ID" });
+    return;
+  }
+
   const query = { _id: new ObjectId(id) };
   const result = await services.deleteOne(query);
+  if (result.deletedCount === 0) {
+    res.status(404).send({ message: "Service not found" });
+    return;
+  }
   res.send(result);
 });
 
@@ -216,14 +419,11 @@ function timeToMinutes(time) {
 }
 
 // বুক করা
-app.post("/bookings", async (req, res) => {
-  const { userId, serviceId, date, time, message = "" } = req.body ?? {};
-  const startMinute =
-    typeof time === "string" ? timeToMinutes(time) : null;
+app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
+  const { serviceId, date, time, message = "" } = req.body ?? {};
+  const startMinute = typeof time === "string" ? timeToMinutes(time) : null;
 
   if (
-    typeof userId !== "string" ||
-    !userId ||
     typeof serviceId !== "string" ||
     !ObjectId.isValid(serviceId) ||
     typeof date !== "string" ||
@@ -255,7 +455,11 @@ app.post("/bookings", async (req, res) => {
   }
 
   const existingBookings = await bookings
-    .find({ serviceId, date })
+    .find({
+      serviceId,
+      date,
+      status: { $in: ["Pending", "Confirmed"] },
+    })
     .project({ _id: 0, time: 1, duration: 1 })
     .toArray();
   const hasOverlap = existingBookings.some((existingBooking) => {
@@ -265,8 +469,7 @@ app.post("/bookings", async (req, res) => {
     }
 
     const existingDuration =
-      Number.isInteger(existingBooking.duration) &&
-      existingBooking.duration > 0
+      Number.isInteger(existingBooking.duration) && existingBooking.duration > 0
         ? existingBooking.duration
         : duration;
     return (
@@ -285,7 +488,7 @@ app.post("/bookings", async (req, res) => {
     (_, index) => startMinute + index * 30,
   );
   const booking = {
-    userId,
+    userId: getAuthenticatedUserId(req.user),
     serviceId,
     serviceName: service.serviceName,
     date,
@@ -294,6 +497,7 @@ app.post("/bookings", async (req, res) => {
     occupiedSlots,
     message: message.trim(),
     status: "Pending",
+    paymentStatus: "Unpaid",
   };
 
   try {
@@ -322,14 +526,18 @@ app.get("/bookings/availability", async (req, res) => {
   }
 
   const service = await services.findOne({ _id: new ObjectId(serviceId) });
-  if (!service) {
-    res.status(404).send({ message: "Service not found" });
+  if (!service || service.status !== "Active") {
+    res.status(404).send({ message: "Service not found or unavailable" });
     return;
   }
 
   const serviceDuration = Number(service.duration);
   const bookingsForDate = await bookings
-    .find({ serviceId, date })
+    .find({
+      serviceId,
+      date,
+      status: { $in: ["Pending", "Confirmed"] },
+    })
     .project({ _id: 0, time: 1, duration: 1 })
     .toArray();
   const bookedSlots = bookingsForDate
@@ -352,37 +560,30 @@ app.get("/bookings/availability", async (req, res) => {
 });
 
 // বুকিং খোজা
-app.get("/bookings", async (req, res) => {
+app.get("/bookings", verifyToken, verifyCustomerOrAdmin, async (req, res) => {
   const query = {};
+  const isAdmin = req.user.role?.toLowerCase() === "admin";
 
-  if (req.query.userId) {
-    query.userId = req.query.userId;
-  }
-  if (req.query.serviceId) {
-    if (!req.user) {
-      res.status(401).send({ message: "Unauthorized" });
-      return;
+  if (isAdmin) {
+    if (typeof req.query.userId === "string") {
+      query.userId = req.query.userId;
     }
-
-    if (!ObjectId.isValid(req.query.serviceId)) {
-      res.status(404).send({ message: "Service not found" });
-      return;
-    }
-
-    const serviceQuery = { _id: new ObjectId(req.query.serviceId) };
-
-    const service = await services.findOne(serviceQuery);
-
-    if (!service) {
-      res.status(404).send({ message: "Service not found" });
-      return;
-    }
-
+  } else {
+    query.userId = getAuthenticatedUserId(req.user);
     if (
-      service.adminId !== (req.user._id?.toString() || req.user.id) &&
-      req.user.role !== "admin"
+      req.query.userId &&
+      req.query.userId !== getAuthenticatedUserId(req.user)
     ) {
       res.status(403).send({ message: "Forbidden" });
+      return;
+    }
+  }
+  if (req.query.serviceId) {
+    if (
+      typeof req.query.serviceId !== "string" ||
+      !ObjectId.isValid(req.query.serviceId)
+    ) {
+      res.status(400).send({ message: "Invalid service ID" });
       return;
     }
 
@@ -395,25 +596,147 @@ app.get("/bookings", async (req, res) => {
 });
 
 // কাস্টমার অনুযায়ী বুকিং খোজা
-app.get("/bookings/count", async (req, res) => {
-  const query = {};
+app.get(
+  "/bookings/count",
+  verifyToken,
+  verifyCustomerOrAdmin,
+  async (req, res) => {
+    const query = {};
+    const isAdmin = req.user.role?.toLowerCase() === "admin";
 
-  if (req.query.userId) {
-    query.userId = req.query.userId;
-  }
+    if (isAdmin && typeof req.query.userId === "string") {
+      query.userId = req.query.userId;
+    } else {
+      query.userId = getAuthenticatedUserId(req.user);
+      if (
+        req.query.userId &&
+        req.query.userId !== getAuthenticatedUserId(req.user)
+      ) {
+        res.status(403).send({ message: "Forbidden" });
+        return;
+      }
+    }
 
-  const result = await bookings.countDocuments(query);
-  res.send({ count: result });
-});
+    const result = await bookings.countDocuments(query);
+    res.send({ count: result });
+  },
+);
 
 // স্ট্যাটাস আপডেট এর জন্য
-app.patch("/bookings/:id", async (req, res) => {
-  const id = req.params.id;
-  const query = { _id: new ObjectId(id) };
-  const updatedDoc = { $set: { status: req.body.status } };
+app.patch(
+  "/bookings/:id",
+  verifyToken,
+  verifyCustomerOrAdmin,
+  async (req, res) => {
+    const id = req.params.id;
+    const { status } = req.body ?? {};
 
-  const result = await bookings.updateOne(query, updatedDoc);
-  res.send(result);
+    if (!ObjectId.isValid(id) || !["Confirmed", "Cancelled"].includes(status)) {
+      res.status(400).send({ message: "Invalid booking update" });
+      return;
+    }
+
+    const query = { _id: new ObjectId(id) };
+    const fieldsToUpdate = { status };
+    const isAdmin = req.user.role?.toLowerCase() === "admin";
+
+    if (isAdmin) {
+      if (status === "Cancelled") {
+        fieldsToUpdate.cancelledBy = "admin";
+      }
+    } else {
+      if (status !== "Cancelled") {
+        res.status(403).send({ message: "Only admins can confirm bookings" });
+        return;
+      }
+      query.userId = getAuthenticatedUserId(req.user);
+      query.status = "Pending";
+      fieldsToUpdate.cancelledBy = "user";
+    }
+
+    const result = await bookings.updateOne(query, { $set: fieldsToUpdate });
+    if (result.matchedCount === 0) {
+      res
+        .status(404)
+        .send({ message: "Booking not found or cannot be updated" });
+      return;
+    }
+    res.send(result);
+  },
+);
+
+// payment related api
+
+app.post("/payment/success-verify", verifyToken, async (req, res) => {
+  const { sessionId } = req.body ?? {};
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    res.status(400).send({ success: false, message: "Session ID is required" });
+    return;
+  }
+  if (!stripe) {
+    res
+      .status(503)
+      .send({ success: false, message: "Payment service is unavailable" });
+    return;
+  }
+
+  const { status, customer_email, metadata, payment_intent, payment_status } =
+    await stripe.checkout.sessions.retrieve(sessionId);
+
+  if (
+    status !== "complete" ||
+    payment_status !== "paid" ||
+    !ObjectId.isValid(metadata?.userId)
+  ) {
+    res
+      .status(400)
+      .send({ success: false, message: "Payment verification failed" });
+    return;
+  }
+  if (
+    metadata.userId !== getAuthenticatedUserId(req.user) &&
+    req.user.role?.toLowerCase() !== "admin"
+  ) {
+    res.status(403).send({ message: "Forbidden" });
+    return;
+  }
+
+  const paymentRecord = {
+    sessionId,
+    status,
+    customer_email,
+    userId: metadata.userId,
+    payment_intent,
+    payment_status,
+    payment_date: new Date(),
+  };
+
+  try {
+    await payments.insertOne(paymentRecord);
+  } catch (error) {
+    if (error?.code === 11000) {
+      res
+        .status(409)
+        .send({ success: false, message: "Payment already verified" });
+      return;
+    }
+    throw error;
+  }
+
+  const updatedResult = await users.updateOne(
+    { _id: new ObjectId(metadata.userId) },
+    { $set: { premium: true } },
+  );
+  res.send({ success: true, updatedResult });
+});
+
+app.use((error, req, res, next) => {
+  console.error(error);
+  if (res.headersSent) {
+    next(error);
+    return;
+  }
+  res.status(500).send({ message: "Internal server error" });
 });
 
 app.listen(port, () => {
