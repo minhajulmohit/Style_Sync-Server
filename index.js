@@ -47,6 +47,7 @@ const bookings = db.collection("bookings");
 const users = db.collection("user");
 const sessions = db.collection("session");
 const payments = db.collection("payments");
+const reviews = db.collection("reviews");
 
 // ডাবল বুকিং আটকানোর জন্যা
 for (const indexName of [
@@ -990,6 +991,12 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
     { $set: { premium: true } },
   );
   res.send({ success: true, updatedResult });
+});
+
+// reviews api
+app.get("/reviews", async (req, res) => {
+  const result = await reviews.find({}).toArray();
+  res.send(result);
 });
 
 app.use((error, req, res, next) => {
