@@ -116,7 +116,7 @@ const verifyToken = async (req, res, next) => {
     return;
   }
 
-  if (user.isBlocked === true) {
+  if (user.banned === true || user.isBlocked === true) {
     res.status(403).send({ message: "Account is blocked" });
     return;
   }
@@ -492,6 +492,7 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     userId: getAuthenticatedUserId(req.user),
     serviceId,
     serviceName: service.serviceName,
+    servicePrice: service.price,
     date,
     time,
     duration,
@@ -499,6 +500,7 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     message: message.trim(),
     status: "Pending",
     paymentStatus: "Unpaid",
+    createdAt: new Date(),
   };
 
   try {
@@ -668,6 +670,11 @@ app.patch(
 
 // payment related api
 
+app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
+  const result = await payments.find({}).sort({ payment_date: -1 }).toArray();
+  res.send(result);
+});
+
 app.post("/payment/success-verify", verifyToken, async (req, res) => {
   const { sessionId } = req.body ?? {};
   if (typeof sessionId !== "string" || !sessionId.trim()) {
@@ -681,8 +688,15 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
     return;
   }
 
-  const { status, customer_email, metadata, payment_intent, payment_status } =
-    await stripe.checkout.sessions.retrieve(sessionId);
+  const {
+    status,
+    customer_email,
+    metadata,
+    payment_intent,
+    payment_status,
+    amount_total,
+    currency,
+  } = await stripe.checkout.sessions.retrieve(sessionId);
 
   if (
     status !== "complete" ||
@@ -702,6 +716,52 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
     return;
   }
 
+  const bookingId = metadata.bookingId;
+  let bookingQuery;
+
+  if (bookingId) {
+    if (!ObjectId.isValid(bookingId)) {
+      res.status(400).send({ message: "Invalid appointment ID" });
+      return;
+    }
+
+    bookingQuery = {
+      _id: new ObjectId(bookingId),
+      userId: metadata.userId,
+      status: "Confirmed",
+    };
+    const booking = await bookings.findOne(bookingQuery);
+    if (!booking) {
+      res.status(404).send({ message: "Confirmed appointment not found" });
+      return;
+    }
+
+    const appointmentPayment = await payments.findOne({ bookingId });
+    if (
+      booking.paymentStatus === "Paid" &&
+      appointmentPayment?.sessionId !== sessionId
+    ) {
+      res.status(409).send({ message: "Appointment has already been paid" });
+      return;
+    }
+  }
+
+  const existingPayment = await payments.findOne({ sessionId });
+  if (existingPayment) {
+    if (bookingId && existingPayment.bookingId === bookingId && bookingQuery) {
+      await bookings.updateOne(bookingQuery, {
+        $set: { paymentStatus: "Paid" },
+      });
+      res.send({ success: true, bookingId });
+      return;
+    }
+
+    res
+      .status(409)
+      .send({ success: false, message: "Payment already verified" });
+    return;
+  }
+
   const paymentRecord = {
     sessionId,
     status,
@@ -709,19 +769,51 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
     userId: metadata.userId,
     payment_intent,
     payment_status,
+    amount_total,
+    currency,
     payment_date: new Date(),
+    ...(bookingId ? { bookingId } : {}),
   };
 
   try {
     await payments.insertOne(paymentRecord);
   } catch (error) {
     if (error?.code === 11000) {
+      const duplicatePayment = await payments.findOne({ sessionId });
+      if (
+        bookingId &&
+        duplicatePayment?.bookingId === bookingId &&
+        bookingQuery
+      ) {
+        await bookings.updateOne(bookingQuery, {
+          $set: { paymentStatus: "Paid" },
+        });
+        res.send({ success: true, bookingId });
+        return;
+      }
+
       res
         .status(409)
         .send({ success: false, message: "Payment already verified" });
       return;
     }
     throw error;
+  }
+
+  if (bookingId && bookingQuery) {
+    const updatedBooking = await bookings.updateOne(bookingQuery, {
+      $set: { paymentStatus: "Paid" },
+    });
+    if (updatedBooking.matchedCount === 0) {
+      res.status(409).send({
+        success: false,
+        message: "The appointment could not be marked as paid",
+      });
+      return;
+    }
+
+    res.send({ success: true, bookingId });
+    return;
   }
 
   const updatedResult = await users.updateOne(
