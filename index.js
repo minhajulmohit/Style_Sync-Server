@@ -169,6 +169,8 @@ app.post("/webhooks/stripe", async (req, res) => {
     currency: checkoutSession.currency,
     payment_date: new Date(),
     bookingId,
+    serviceName: booking?.serviceName,
+    appointmentDate: booking?.date ? `${booking.date} · ${booking.time}` : undefined,
   };
 
   try {
@@ -942,7 +944,15 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
     amount_total,
     currency,
     payment_date: new Date(),
-    ...(bookingId ? { bookingId } : {}),
+    ...(bookingId
+      ? {
+          bookingId,
+          serviceName: booking?.serviceName,
+          appointmentDate: booking?.date
+            ? `${booking.date} · ${booking.time}`
+            : undefined,
+        }
+      : {}),
   };
 
   try {
