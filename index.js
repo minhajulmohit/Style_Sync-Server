@@ -31,6 +31,7 @@ const connectToClient = await connectToMongoDB();
 
 const db = client.db("StyleSync");
 const services = db.collection("services");
+const bookings = db.collection("bookings");
 
 // Test
 app.get("/", (req, res) => {
@@ -167,6 +168,82 @@ app.delete("/services/:id", async (req, res) => {
   const id = req.params.id;
   const query = { _id: new ObjectId(id) };
   const result = await services.deleteOne(query);
+  res.send(result);
+});
+
+// booking related
+
+// বুক করা
+app.post("/bookings", async (req, res) => {
+  const booking = req.body;
+  const result = await bookings.insertOne(booking);
+  if (result.acknowledged) {
+    res.status(200).send(result);
+  }
+});
+
+// বুকিং খোজা
+app.get("/bookings", async (req, res) => {
+  const query = {};
+
+  if (req.query.userId) {
+    query.userId = req.query.userId;
+  }
+  if (req.query.serviceId) {
+    if (!req.user) {
+      res.status(401).send({ message: "Unauthorized" });
+      return;
+    }
+
+    if (!ObjectId.isValid(req.query.serviceId)) {
+      res.status(404).send({ message: "Service not found" });
+      return;
+    }
+
+    const serviceQuery = { _id: new ObjectId(req.query.serviceId) };
+
+    const service = await services.findOne(serviceQuery);
+
+    if (!service) {
+      res.status(404).send({ message: "Service not found" });
+      return;
+    }
+
+    if (
+      service.adminId !== (req.user._id?.toString() || req.user.id) &&
+      req.user.role !== "admin"
+    ) {
+      res.status(403).send({ message: "Forbidden" });
+      return;
+    }
+
+    query.serviceId = req.query.serviceId;
+  }
+
+  const cursor = bookings.find(query);
+  const result = await cursor.toArray();
+  res.send(result);
+});
+
+// কাস্টমার অনুযায়ী বুকিং খোজা
+app.get("/bookings/count", async (req, res) => {
+  const query = {};
+
+  if (req.query.userId) {
+    query.userId = req.query.userId;
+  }
+
+  const result = await bookings.countDocuments(query);
+  res.send({ count: result });
+});
+
+// স্ট্যাটাস আপডেট এর জন্য
+app.patch("/bookings/:id", async (req, res) => {
+  const id = req.params.id;
+  const query = { _id: new ObjectId(id) };
+  const updatedDoc = { $set: { status: req.body.status } };
+
+  const result = await bookings.updateOne(query, updatedDoc);
   res.send(result);
 });
 
