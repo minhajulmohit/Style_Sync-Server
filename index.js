@@ -33,6 +33,31 @@ const db = client.db("StyleSync");
 const services = db.collection("services");
 const bookings = db.collection("bookings");
 
+// ডাবল বুকিং আটকানোর জন্যা
+await bookings.createIndex(
+  { serviceId: 1, date: 1, time: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      serviceId: { $type: "string" },
+      date: { $type: "string" },
+      time: { $type: "string" },
+    },
+  },
+);
+
+await bookings.createIndex(
+  { serviceId: 1, date: 1, occupiedSlots: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      serviceId: { $type: "string" },
+      date: { $type: "string" },
+      occupiedSlots: { $type: "array" },
+    },
+  },
+);
+
 // Test
 app.get("/", (req, res) => {
   res.type("html").send(`<!doctype html>
@@ -173,13 +198,157 @@ app.delete("/services/:id", async (req, res) => {
 
 // booking related
 
+function isValidBookingDate(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return false;
+  }
+
+  const parsedDate = new Date(`${date}T00:00:00.000Z`);
+  return (
+    !Number.isNaN(parsedDate.getTime()) &&
+    parsedDate.toISOString().slice(0, 10) === date
+  );
+}
+
+function timeToMinutes(time) {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+}
+
 // বুক করা
 app.post("/bookings", async (req, res) => {
-  const booking = req.body;
-  const result = await bookings.insertOne(booking);
-  if (result.acknowledged) {
-    res.status(200).send(result);
+  const { userId, serviceId, date, time, message = "" } = req.body ?? {};
+  const startMinute =
+    typeof time === "string" ? timeToMinutes(time) : null;
+
+  if (
+    typeof userId !== "string" ||
+    !userId ||
+    typeof serviceId !== "string" ||
+    !ObjectId.isValid(serviceId) ||
+    typeof date !== "string" ||
+    !isValidBookingDate(date) ||
+    startMinute === null ||
+    startMinute % 30 !== 0 ||
+    typeof message !== "string" ||
+    message.length > 500
+  ) {
+    res.status(400).send({ message: "Invalid booking details" });
+    return;
   }
+
+  const service = await services.findOne({ _id: new ObjectId(serviceId) });
+  if (!service || service.status !== "Active") {
+    res.status(404).send({ message: "Service not found or unavailable" });
+    return;
+  }
+
+  const duration = Number(service.duration);
+  if (!Number.isInteger(duration) || duration <= 0) {
+    res.status(422).send({ message: "Service duration is invalid" });
+    return;
+  }
+
+  if (startMinute + duration > 24 * 60) {
+    res.status(400).send({ message: "Booking does not fit within this day" });
+    return;
+  }
+
+  const existingBookings = await bookings
+    .find({ serviceId, date })
+    .project({ _id: 0, time: 1, duration: 1 })
+    .toArray();
+  const hasOverlap = existingBookings.some((existingBooking) => {
+    const existingStart = timeToMinutes(existingBooking.time);
+    if (existingStart === null) {
+      return false;
+    }
+
+    const existingDuration =
+      Number.isInteger(existingBooking.duration) &&
+      existingBooking.duration > 0
+        ? existingBooking.duration
+        : duration;
+    return (
+      startMinute < existingStart + existingDuration &&
+      existingStart < startMinute + duration
+    );
+  });
+
+  if (hasOverlap) {
+    res.status(409).send({ message: "This time overlaps an existing booking" });
+    return;
+  }
+
+  const occupiedSlots = Array.from(
+    { length: Math.ceil(duration / 30) },
+    (_, index) => startMinute + index * 30,
+  );
+  const booking = {
+    userId,
+    serviceId,
+    serviceName: service.serviceName,
+    date,
+    time,
+    duration,
+    occupiedSlots,
+    message: message.trim(),
+    status: "Pending",
+  };
+
+  try {
+    const result = await bookings.insertOne(booking);
+    res.status(201).send(result);
+  } catch (error) {
+    if (error?.code === 11000) {
+      res.status(409).send({ message: "This time is already booked" });
+      return;
+    }
+    throw error;
+  }
+});
+
+app.get("/bookings/availability", async (req, res) => {
+  const { serviceId, date } = req.query;
+
+  if (
+    typeof serviceId !== "string" ||
+    !ObjectId.isValid(serviceId) ||
+    typeof date !== "string" ||
+    !isValidBookingDate(date)
+  ) {
+    res.status(400).send({ message: "Invalid service or date" });
+    return;
+  }
+
+  const service = await services.findOne({ _id: new ObjectId(serviceId) });
+  if (!service) {
+    res.status(404).send({ message: "Service not found" });
+    return;
+  }
+
+  const serviceDuration = Number(service.duration);
+  const bookingsForDate = await bookings
+    .find({ serviceId, date })
+    .project({ _id: 0, time: 1, duration: 1 })
+    .toArray();
+  const bookedSlots = bookingsForDate
+    .map((booking) => ({
+      time: booking.time,
+      duration:
+        Number.isInteger(booking.duration) && booking.duration > 0
+          ? booking.duration
+          : serviceDuration,
+    }))
+    .filter(
+      (booking) =>
+        timeToMinutes(booking.time) !== null &&
+        Number.isInteger(booking.duration) &&
+        booking.duration > 0,
+    )
+    .sort((first, second) => first.time.localeCompare(second.time));
+
+  res.send({ bookedSlots });
 });
 
 // বুকিং খোজা
