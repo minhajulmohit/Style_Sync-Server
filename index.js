@@ -43,10 +43,10 @@ await connectToMongoDB();
 
 const db = client.db("StyleSync");
 const services = db.collection("services");
-const bookings = db.collection("bookings");
+const bookings = db.collection("appointments");
 const users = db.collection("user");
 const sessions = db.collection("session");
-const payments = db.collection("payments");
+const payments = db.collection("transactions");
 const reviews = db.collection("reviews");
 
 // ডাবল বুকিং আটকানোর জন্যা
