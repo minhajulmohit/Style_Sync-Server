@@ -49,16 +49,18 @@ const sessions = db.collection("session");
 const payments = db.collection("transactions");
 const reviews = db.collection("reviews");
 
-// ডাবল বুকিং আটকানোর জন্যা
+// Drop old indexes gracefully (ignore if not found)
 for (const indexName of [
   "serviceId_1_date_1_time_1",
   "serviceId_1_date_1_occupiedSlots_1",
+  "active_service_date_time",
+  "active_service_date_slots",
 ]) {
   try {
     await bookings.dropIndex(indexName);
   } catch (error) {
     if (error?.code !== 27) {
-      throw error;
+      // ignore IndexNotFound (27), rethrow others
     }
   }
 }
