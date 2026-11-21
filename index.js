@@ -680,12 +680,10 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     Number.isNaN(slotDateTime.getTime()) ||
     slotDateTime.getTime() <= Date.now()
   ) {
-    res
-      .status(400)
-      .send({
-        message:
-          "Cannot book an appointment in the past. Please select a future time.",
-      });
+    res.status(400).send({
+      message:
+        "Cannot book an appointment in the past. Please select a future time.",
+    });
     return;
   }
 
@@ -926,10 +924,14 @@ app.patch(
 app.post("/payment/success-verify", verifyToken, async (req, res) => {
   const { sessionId } = req.body ?? {};
   if (typeof sessionId !== "string" || !sessionId.trim()) {
-    return res.status(400).send({ success: false, message: "Session ID is required" });
+    return res
+      .status(400)
+      .send({ success: false, message: "Session ID is required" });
   }
   if (!stripe) {
-    return res.status(503).send({ success: false, message: "Payment service is unavailable" });
+    return res
+      .status(503)
+      .send({ success: false, message: "Payment service is unavailable" });
   }
 
   let session;
@@ -947,16 +949,26 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
   const userId = session.metadata?.userId;
   const bookingId = session.metadata?.bookingId;
 
-  if (userId !== getAuthenticatedUserId(req.user) && req.user.role?.toLowerCase() !== "admin") {
+  if (
+    userId !== getAuthenticatedUserId(req.user) &&
+    req.user.role?.toLowerCase() !== "admin"
+  ) {
     return res.status(403).send({ success: false, message: "Forbidden" });
   }
   if (session.payment_status !== "paid" || !ObjectId.isValid(bookingId)) {
-    return res.status(400).send({ success: false, message: "Payment not completed" });
+    return res
+      .status(400)
+      .send({ success: false, message: "Payment not completed" });
   }
 
-  const booking = await bookings.findOne({ _id: new ObjectId(bookingId), userId });
+  const booking = await bookings.findOne({
+    _id: new ObjectId(bookingId),
+    userId,
+  });
   if (!booking) {
-    return res.status(404).send({ success: false, message: "Appointment not found" });
+    return res
+      .status(404)
+      .send({ success: false, message: "Appointment not found" });
   }
 
   const paymentRecord = {
