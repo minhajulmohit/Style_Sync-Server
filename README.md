@@ -1,61 +1,83 @@
-# StyleSync Server
+# SalonBook Backend API Server
 
-Express and MongoDB API for the StyleSync salon booking client.
+Backend API for the SalonBook salon booking platform. The client application
+is currently branded as StyleSync.
 
-## Local development
+## Important Features
 
-Install dependencies and start the server:
+- Server-side role-based access control for customers and administrators.
+- Revalidates user roles and blocked status from MongoDB on protected requests;
+  blocked users receive `403 Forbidden`.
+- Blocking an account revokes active Better Auth sessions.
+- Booking validation checks customer appointment overlaps and occupied
+  service slots.
+- Signature-verified, idempotent Stripe webhook updates `paymentStatus` to
+  `Paid`. Payment record insertion and booking update are separate database
+  operations, not a multi-document transaction.
+- Database indexes are synchronized separately, not on API startup.
+
+## Technology Stack
+
+![Node.js](https://img.shields.io/badge/Node.js-runtime-339933?logo=nodedotjs)
+![Express.js 5](https://img.shields.io/badge/Express-5-000000?logo=express)
+![MongoDB Native Driver](https://img.shields.io/badge/MongoDB-native_driver-47A248?logo=mongodb)
+![Better Auth Sessions](https://img.shields.io/badge/Better_Auth-shared_sessions-333333)
+![Stripe SDK](https://img.shields.io/badge/Stripe-SDK-635bff?logo=stripe)
+![CORS](https://img.shields.io/badge/CORS-enabled-555555)
+![Dotenv](https://img.shields.io/badge/Dotenv-configured-ECD53F)
+
+The API uses the MongoDB native driver, not Mongoose. Better Auth is configured
+in the client; this server verifies the client's short-lived JWTs and reads
+shared MongoDB user/session records.
+
+## Installation Instructions
 
 ```bash
+git clone https://github.com/minhajulmohit/Style_Sync-Server.git
+cd Style_Sync-Server
 npm install
-node index.js
 ```
 
-The API uses port `8000` by default. Set `PORT` to use another port.
+Create `.env` and add the environment variable names listed below. Never
+commit secret values.
 
-Synchronize database indexes separately for each database environment, and
-rerun this command only when index definitions change:
+## How to Run the Project Locally
+
+Synchronize indexes once per database environment, and again only when index
+definitions change:
 
 ```bash
 npm run db:sync-indexes
 ```
 
-The API server does not modify indexes during startup.
+Then start the API:
 
-## Environment variables
+```bash
+node index.js
+```
 
-Set these in a local `.env` file. Do not commit credentials.
+The API listens on port `8000` by default. This repository does not define
+`npm start` or `npm run dev`.
 
-| Variable | Purpose |
-| --- | --- |
-| `MONGODB_URL` | MongoDB connection string |
-| `API_JWT_SECRET` | Shared HS256 signing secret (at least 32 bytes); set the same value in the client and server deployments |
-| `PORT` | Optional Express port; defaults to `8000` |
-| `STRIPE_SECRET_KEY` | Stripe API secret used for checkout verification |
-| `STRIPE_WEBHOOK_SECRET` | Stripe endpoint signing secret for `/webhooks/stripe` |
+## Required Environment Variables
 
-Configure Stripe to send `checkout.session.completed` and
-`checkout.session.async_payment_succeeded` events to the deployed server's
-`/webhooks/stripe` endpoint. Configure the endpoint and its signing secret for
-each Stripe mode you use (test and live). The webhook returns `503` until
-`STRIPE_WEBHOOK_SECRET` is configured.
+Required:
 
-## Main API routes
+- `MONGODB_URL`
+- `API_JWT_SECRET`
 
-- `PATCH /users/:id/block` — block or unblock a user (admin only); blocking revokes active sessions
-- `GET /services` — active services
-- `GET /admin/services` — all services (admin only)
-- `POST /add-service` — create a service (admin only)
-- `PATCH` and `DELETE /services/:id` — update or delete a service (admin only)
-- `POST /bookings` — create a customer booking
-- `GET /bookings` — list the authenticated customer's bookings or all bookings
-  for an admin
-- `PATCH /bookings/:id` — cancel or update a booking
-- `GET /payments` — verified payments (admin only)
-- `POST /payment/success-verify` — verify a Stripe Checkout return
-- `POST /webhooks/stripe` — verify Stripe webhook events
+Optional or feature-dependent:
 
-Protected API routes require a short-lived HS256 JWT in the
-`Authorization: Bearer <token>` header. The client signs this JWT after
-validating the user's Better Auth session; the API reloads the user from
-MongoDB on each request so current roles and blocked status take effect.
+- `PORT`
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+
+## Live Website Link
+
+- Client: [StyleSync Client](https://stylesyncclient.vercel.app)
+- Server API: [StyleSync Server](https://style-sync-server.vercel.app)
+
+## Client and Server Repository Links
+
+- Client: [Style_Sync-Client](https://github.com/minhajulmohit/Style_Sync-Client)
+- Server: [Style_Sync-Server](https://github.com/minhajulmohit/Style_Sync-Server)
