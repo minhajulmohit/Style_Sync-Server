@@ -159,8 +159,7 @@ app.post("/webhooks/stripe", async (req, res) => {
     sessionId: checkoutSession.id,
     status: checkoutSession.status,
     customer_email:
-      checkoutSession.customer_details?.email ??
-      checkoutSession.customer_email,
+      checkoutSession.customer_details?.email ?? checkoutSession.customer_email,
     userId,
     payment_intent:
       typeof checkoutSession.payment_intent === "string"
@@ -172,7 +171,9 @@ app.post("/webhooks/stripe", async (req, res) => {
     payment_date: new Date(),
     bookingId,
     serviceName: booking?.serviceName,
-    appointmentDate: booking?.date ? `${booking.date} · ${booking.time}` : undefined,
+    appointmentDate: booking?.date
+      ? `${booking.date} · ${booking.time}`
+      : undefined,
   };
 
   try {
@@ -196,7 +197,7 @@ app.post("/webhooks/stripe", async (req, res) => {
 // jwt create api
 app.post("/jwt", async (req, res) => {
   const user = req.body;
-  const secret = process.env.JWT_SECRET || "stylesync_jwt_secret_key_2026";
+  const secret = process.env.JWT_SECRET;
   const token = jwt.sign(user, secret, { expiresIn: "7d" });
   res.send({ token });
 });
@@ -279,8 +280,7 @@ const verifyToken = async (req, res, next) => {
   req.user = user;
   next();
 };
-const isCustomerRole = (role) =>
-  role === "customer" || role === "user";
+const isCustomerRole = (role) => role === "customer" || role === "user";
 const verifyCustomer = async (req, res, next) => {
   if (!isCustomerRole(req.user?.role?.toLowerCase())) {
     res.status(403).send({ message: "Forbidden" });
@@ -630,8 +630,16 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
   }
 
   const slotDateTime = new Date(`${date}T${time}:00`);
-  if (Number.isNaN(slotDateTime.getTime()) || slotDateTime.getTime() <= Date.now()) {
-    res.status(400).send({ message: "Cannot book an appointment in the past. Please select a future time." });
+  if (
+    Number.isNaN(slotDateTime.getTime()) ||
+    slotDateTime.getTime() <= Date.now()
+  ) {
+    res
+      .status(400)
+      .send({
+        message:
+          "Cannot book an appointment in the past. Please select a future time.",
+      });
     return;
   }
 
@@ -848,167 +856,40 @@ app.patch(
   },
 );
 
-// payment related api
-
-app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
-  const result = await payments.find({}).sort({ payment_date: -1 }).toArray();
-  res.send(result);
-});
-
 app.post("/payment/success-verify", verifyToken, async (req, res) => {
   const { sessionId } = req.body ?? {};
   if (typeof sessionId !== "string" || !sessionId.trim()) {
-    res.status(400).send({ success: false, message: "Session ID is required" });
-    return;
+    return res.status(400).send({ success: false, message: "Session ID is required" });
   }
   if (!stripe) {
-    res
-      .status(503)
-      .send({ success: false, message: "Payment service is unavailable" });
-    return;
+    return res.status(503).send({ success: false, message: "Payment service is unavailable" });
   }
 
-  const {
-    status,
-    customer_email,
-    metadata,
-    payment_intent,
-    payment_status,
-    amount_total,
-    currency,
-  } = await stripe.checkout.sessions.retrieve(sessionId);
-
-  if (
-    status !== "complete" ||
-    payment_status !== "paid" ||
-    !ObjectId.isValid(metadata?.userId)
-  ) {
-    res
-      .status(400)
-      .send({ success: false, message: "Payment verification failed" });
-    return;
-  }
-  if (
-    metadata.userId !== getAuthenticatedUserId(req.user) &&
-    req.user.role?.toLowerCase() !== "admin"
-  ) {
-    res.status(403).send({ message: "Forbidden" });
-    return;
-  }
-
-  const bookingId = metadata.bookingId;
-  let bookingQuery;
-
-  if (bookingId) {
-    if (!ObjectId.isValid(bookingId)) {
-      res.status(400).send({ message: "Invalid appointment ID" });
-      return;
-    }
-
-    bookingQuery = {
-      _id: new ObjectId(bookingId),
-      userId: metadata.userId,
-      status: "Confirmed",
-    };
-    const booking = await bookings.findOne(bookingQuery);
-    if (!booking) {
-      res.status(404).send({ message: "Confirmed appointment not found" });
-      return;
-    }
-
-    const appointmentPayment = await payments.findOne({ bookingId });
-    if (
-      booking.paymentStatus === "Paid" &&
-      appointmentPayment?.sessionId !== sessionId
-    ) {
-      res.status(409).send({ message: "Appointment has already been paid" });
-      return;
-    }
-  }
-
-  const existingPayment = await payments.findOne({ sessionId });
-  if (existingPayment) {
-    if (bookingId && existingPayment.bookingId === bookingId && bookingQuery) {
-      await bookings.updateOne(bookingQuery, {
-        $set: { paymentStatus: "Paid" },
-      });
-      res.send({ success: true, bookingId });
-      return;
-    }
-
-    res
-      .status(409)
-      .send({ success: false, message: "Payment already verified" });
-    return;
-  }
-
-  const paymentRecord = {
-    sessionId,
-    status,
-    customer_email,
-    userId: metadata.userId,
-    payment_intent,
-    payment_status,
-    amount_total,
-    currency,
-    payment_date: new Date(),
-    ...(bookingId
-      ? {
-          bookingId,
-          serviceName: booking?.serviceName,
-          appointmentDate: booking?.date
-            ? `${booking.date} · ${booking.time}`
-            : undefined,
-        }
-      : {}),
-  };
-
+  let session;
   try {
-    await payments.insertOne(paymentRecord);
+    session = await stripe.checkout.sessions.retrieve(sessionId);
   } catch (error) {
-    if (error?.code === 11000) {
-      const duplicatePayment = await payments.findOne({ sessionId });
-      if (
-        bookingId &&
-        duplicatePayment?.bookingId === bookingId &&
-        bookingQuery
-      ) {
-        await bookings.updateOne(bookingQuery, {
-          $set: { paymentStatus: "Paid" },
-        });
-        res.send({ success: true, bookingId });
-        return;
-      }
-
-      res
-        .status(409)
-        .send({ success: false, message: "Payment already verified" });
-      return;
-    }
-    throw error;
+    console.error("Stripe session retrieve failed:", error.message);
+    return res.status(400).send({ success: false, message: "Invalid Stripe session" });
   }
 
-  if (bookingId && bookingQuery) {
-    const updatedBooking = await bookings.updateOne(bookingQuery, {
-      $set: { paymentStatus: "Paid" },
-    });
-    if (updatedBooking.matchedCount === 0) {
-      res.status(409).send({
-        success: false,
-        message: "The appointment could not be marked as paid",
-      });
-      return;
-    }
+  const userId = session.metadata?.userId;
+  const bookingId = session.metadata?.bookingId;
 
-    res.send({ success: true, bookingId });
-    return;
+  if (userId !== getAuthenticatedUserId(req.user) && req.user.role?.toLowerCase() !== "admin") {
+    return res.status(403).send({ success: false, message: "Forbidden" });
+  }
+  if (session.payment_status !== "paid" || !ObjectId.isValid(bookingId)) {
+    return res.status(400).send({ success: false, message: "Payment not completed" });
   }
 
-  const updatedResult = await users.updateOne(
-    { _id: new ObjectId(metadata.userId) },
-    { $set: { premium: true } },
-  );
-  res.send({ success: true, updatedResult });
+  const booking = await bookings.findOne({ _id: new ObjectId(bookingId), userId });
+  if (!booking) {
+    return res.status(404).send({ success: false, message: "Appointment not found" });
+  }
+
+  // Paid শুধু webhook করবে। এখানে শুধু জানাচ্ছি।
+  res.send({ success: true, bookingId, paid: booking.paymentStatus === "Paid" });
 });
 
 // reviews api
