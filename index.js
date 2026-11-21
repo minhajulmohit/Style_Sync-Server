@@ -312,14 +312,18 @@ app.patch("/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
   const { isBlocked } = req.body ?? {};
 
   if (!ObjectId.isValid(id) || typeof isBlocked !== "boolean") {
-    res.status(400).send({ message: "A valid user ID and isBlocked value are required." });
+    res
+      .status(400)
+      .send({ message: "A valid user ID and isBlocked value are required." });
     return;
   }
 
   const targetUserId = new ObjectId(id).toString();
   const currentUserId = getAuthenticatedUserId(req.user);
   if (targetUserId === currentUserId) {
-    res.status(403).send({ message: "You cannot block or unblock your own account." });
+    res
+      .status(403)
+      .send({ message: "You cannot block or unblock your own account." });
     return;
   }
 
