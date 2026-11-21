@@ -20,15 +20,8 @@ if (!apiJwtSecret || Buffer.byteLength(apiJwtSecret, "utf8") < 32) {
   throw new Error("API_JWT_SECRET must be configured with at least 32 bytes.");
 }
 
-app.use(
-  express.json({
-    verify(req, res, buffer) {
-      if (req.originalUrl === "/webhooks/stripe") {
-        req.rawBody = buffer;
-      }
-    },
-  }),
-);
+app.use("/webhooks/stripe", express.raw({ type: "application/json" }));
+app.use(express.json());
 app.use(cors());
 
 //
@@ -109,7 +102,7 @@ app.post("/webhooks/stripe", async (req, res) => {
     res.status(503).send({ message: "Stripe webhook is not configured" });
     return;
   }
-  if (typeof signature !== "string" || !req.rawBody) {
+  if (typeof signature !== "string" || !Buffer.isBuffer(req.body)) {
     res.status(400).send({ message: "Invalid Stripe webhook request" });
     return;
   }
@@ -117,12 +110,15 @@ app.post("/webhooks/stripe", async (req, res) => {
   let event;
   try {
     event = stripe.webhooks.constructEvent(
-      req.rawBody,
+      req.body,
       signature,
       webhookSecret,
     );
   } catch (error) {
-    console.error("Stripe webhook signature verification failed:", error);
+    console.error(
+      "Stripe webhook signature verification failed:",
+      error instanceof Error ? error.message : "Unknown verification error",
+    );
     res.status(400).send({ message: "Invalid Stripe signature" });
     return;
   }
