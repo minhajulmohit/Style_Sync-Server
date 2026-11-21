@@ -1,7 +1,6 @@
-# SalonBook Backend API Server
+# StyleSync Backend API Server
 
-Backend API for the SalonBook salon booking platform. The client application
-is currently branded as StyleSync.
+Backend API for the StyleSync salon booking platform.
 
 ## Important Features
 
