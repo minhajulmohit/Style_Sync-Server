@@ -870,7 +870,11 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
     session = await stripe.checkout.sessions.retrieve(sessionId);
   } catch (error) {
     console.error("Stripe session retrieve failed:", error.message);
-    return res.status(400).send({ success: false, message: "Invalid Stripe session" });
+    return res.status(400).send({
+      success: false,
+      message:
+        "Invalid Stripe session or Stripe key mismatch. Use the same test/live Stripe account and secret key on the client and server.",
+    });
   }
 
   const userId = session.metadata?.userId;
