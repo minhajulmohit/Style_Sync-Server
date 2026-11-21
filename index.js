@@ -49,51 +49,6 @@ const sessions = db.collection("session");
 const payments = db.collection("transactions");
 const reviews = db.collection("reviews");
 
-// Drop old indexes gracefully (ignore if not found)
-for (const indexName of [
-  "serviceId_1_date_1_time_1",
-  "serviceId_1_date_1_occupiedSlots_1",
-  "active_service_date_time",
-  "active_service_date_slots",
-]) {
-  try {
-    await bookings.dropIndex(indexName);
-  } catch (error) {
-    if (error?.code !== 27) {
-      // ignore IndexNotFound (27), rethrow others
-    }
-  }
-}
-
-await bookings.createIndex(
-  { serviceId: 1, date: 1, time: 1 },
-  {
-    name: "active_service_date_time",
-    unique: true,
-    partialFilterExpression: {
-      serviceId: { $type: "string" },
-      date: { $type: "string" },
-      time: { $type: "string" },
-      status: { $in: ["Pending", "Confirmed"] },
-    },
-  },
-);
-await payments.createIndex({ sessionId: 1 }, { unique: true });
-
-await bookings.createIndex(
-  { serviceId: 1, date: 1, occupiedSlots: 1 },
-  {
-    name: "active_service_date_slots",
-    unique: true,
-    partialFilterExpression: {
-      serviceId: { $type: "string" },
-      date: { $type: "string" },
-      occupiedSlots: { $type: "array" },
-      status: { $in: ["Pending", "Confirmed"] },
-    },
-  },
-);
-
 app.post("/webhooks/stripe", async (req, res) => {
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
   const signature = req.headers["stripe-signature"];
@@ -364,7 +319,9 @@ app.patch("/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
   await users.updateOne({ _id: new ObjectId(id) }, update);
 
   if (isBlocked) {
-    await sessions.deleteMany({ userId: targetUserId });
+    await sessions.deleteMany({
+      userId: { $in: [new ObjectId(id), targetUserId] },
+    });
   }
 
   res.send({ success: true, userId: targetUserId, isBlocked });
@@ -701,15 +658,16 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     return;
   }
 
+  const userId = getAuthenticatedUserId(req.user);
   const existingBookings = await bookings
     .find({
-      serviceId,
       date,
       status: { $in: ["Pending", "Confirmed"] },
+      $or: [{ serviceId }, { userId }],
     })
-    .project({ _id: 0, time: 1, duration: 1 })
+    .project({ _id: 0, serviceId: 1, userId: 1, time: 1, duration: 1 })
     .toArray();
-  const hasOverlap = existingBookings.some((existingBooking) => {
+  const overlappingBookings = existingBookings.filter((existingBooking) => {
     const existingStart = timeToMinutes(existingBooking.time);
     if (existingStart === null) {
       return false;
@@ -725,7 +683,14 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     );
   });
 
-  if (hasOverlap) {
+  if (overlappingBookings.some((booking) => booking.userId === userId)) {
+    res
+      .status(409)
+      .send({ message: "You already have an appointment during this time" });
+    return;
+  }
+
+  if (overlappingBookings.some((booking) => booking.serviceId === serviceId)) {
     res.status(409).send({ message: "This time overlaps an existing booking" });
     return;
   }
@@ -735,7 +700,7 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     (_, index) => startMinute + index * 30,
   );
   const booking = {
-    userId: getAuthenticatedUserId(req.user),
+    userId,
     serviceId,
     serviceName: service.serviceName,
     servicePrice: service.price,

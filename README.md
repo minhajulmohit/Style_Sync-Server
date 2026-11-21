@@ -13,6 +13,15 @@ node index.js
 
 The API uses port `8000` by default. Set `PORT` to use another port.
 
+Synchronize database indexes separately for each database environment, and
+rerun this command only when index definitions change:
+
+```bash
+npm run db:sync-indexes
+```
+
+The API server does not modify indexes during startup.
+
 ## Environment variables
 
 Set these in a local `.env` file. Do not commit credentials.
