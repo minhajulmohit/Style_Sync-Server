@@ -30,6 +30,7 @@ server's `/webhooks/stripe` endpoint. The webhook returns `503` until
 
 ## Main API routes
 
+- `PATCH /users/:id/block` — block or unblock a user (admin only); blocking revokes active sessions
 - `GET /services` — active services
 - `GET /admin/services` — all services (admin only)
 - `POST /add-service` — create a service (admin only)

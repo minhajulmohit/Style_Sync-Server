@@ -3,7 +3,6 @@ import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import Stripe from "stripe";
-import jwt from "jsonwebtoken";
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -194,91 +193,73 @@ app.post("/webhooks/stripe", async (req, res) => {
   res.send({ received: true });
 });
 
-// jwt create api
-app.post("/jwt", async (req, res) => {
-  const user = req.body;
-  const secret = process.env.JWT_SECRET;
-  const token = jwt.sign(user, secret, { expiresIn: "7d" });
-  res.send({ token });
-});
+const BLOCKED_ACCOUNT_MESSAGE =
+  "Your account has been blocked by an administrator.";
 
-// jwt and session verification middleware
+const isUserBlocked = (user) => {
+  if (user?.isBlocked === true) {
+    return true;
+  }
+
+  if (user?.banned !== true) {
+    return false;
+  }
+
+  if (!user.banExpires) {
+    return true;
+  }
+
+  const banExpiresAt = new Date(user.banExpires).getTime();
+  return !Number.isFinite(banExpiresAt) || banExpiresAt > Date.now();
+};
+
 const verifyToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    res.status(401).send({ message: "Unauthorized" });
+  try {
+    const authorization = req.headers.authorization;
+    const match =
+      typeof authorization === "string" &&
+      authorization.match(/^Bearer\s+(\S+)$/i);
+    if (!match) {
+      res.status(401).send({ message: "Unauthorized" });
+      return;
+    }
 
-    return;
-  }
-  const token = authHeader.split(" ")[1];
-  if (!token) {
-    res.status(401).send({ message: "Unauthorized" });
+    const session = await sessions.findOne({ token: match[1] });
+    if (!session) {
+      res.status(401).send({ message: "Unauthorized" });
+      return;
+    }
 
-    return;
-  }
+    const expiresAt = new Date(session.expiresAt).getTime();
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      await sessions.deleteOne({ _id: session._id });
+      res.status(401).send({ message: "Unauthorized" });
+      return;
+    }
 
-  // Check if token is a JWT
-  const isJwt = token.split(".").length === 3;
-  if (isJwt) {
-    const secret = process.env.JWT_SECRET || "stylesync_jwt_secret_key_2026";
-    jwt.verify(token, secret, async (err, decoded) => {
-      if (err) {
-        res.status(401).send({ message: "Unauthorized" });
-        return;
-      }
+    if (!ObjectId.isValid(session.userId)) {
+      res.status(401).send({ message: "Unauthorized" });
+      return;
+    }
 
-      const userId = decoded.id || decoded._id || decoded.userId;
-      let user = null;
-      if (userId && ObjectId.isValid(userId)) {
-        user = await users.findOne({ _id: new ObjectId(userId) });
-      } else if (decoded.email) {
-        user = await users.findOne({ email: decoded.email });
-      }
-
-      if (!user) {
-        res.status(401).send({ message: "Unauthorized" });
-        return;
-      }
-
-      if (user.banned === true || user.isBlocked === true) {
-        res.status(403).send({ message: "Account is blocked" });
-        return;
-      }
-
-      req.user = user;
-      next();
+    const user = await users.findOne({
+      _id: new ObjectId(session.userId),
     });
-    return;
-  }
+    if (!user) {
+      res.status(401).send({ message: "Unauthorized" });
+      return;
+    }
 
-  // Session token verification (Better Auth)
-  const query = { token };
-  const session = await sessions.findOne(query);
+    if (isUserBlocked(user)) {
+      res.status(403).send({ message: BLOCKED_ACCOUNT_MESSAGE });
+      return;
+    }
 
-  if (!session) {
-    res.status(401).send({ message: "Unauthorized" });
-    return;
+    req.user = user;
+    next();
+  } catch (error) {
+    next(error);
   }
-  const userId = session.userId;
-  if (!ObjectId.isValid(userId)) {
-    res.status(401).send({ message: "Unauthorized" });
-    return;
-  }
-
-  const userQuery = { _id: new ObjectId(userId) };
-  const user = await users.findOne(userQuery);
-  if (!user) {
-    res.status(401).send({ message: "Unauthorized" });
-    return;
-  }
-
-  if (user.banned === true || user.isBlocked === true) {
-    res.status(403).send({ message: "Account is blocked" });
-    return;
-  }
-
-  req.user = user;
-  next();
 };
 const isCustomerRole = (role) => role === "customer" || role === "user";
 const verifyCustomer = async (req, res, next) => {
@@ -313,6 +294,66 @@ app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
   const result = await cursor.toArray();
 
   res.send(result);
+});
+
+app.patch("/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { isBlocked } = req.body ?? {};
+
+  if (!ObjectId.isValid(id) || typeof isBlocked !== "boolean") {
+    res.status(400).send({ message: "A valid user ID and isBlocked value are required." });
+    return;
+  }
+
+  const targetUserId = new ObjectId(id).toString();
+  const currentUserId = getAuthenticatedUserId(req.user);
+  if (targetUserId === currentUserId) {
+    res.status(403).send({ message: "You cannot block or unblock your own account." });
+    return;
+  }
+
+  const targetUser = await users.findOne(
+    { _id: new ObjectId(id) },
+    { projection: { role: 1 } },
+  );
+  if (!targetUser) {
+    res.status(404).send({ message: "User not found." });
+    return;
+  }
+  const targetRoles =
+    typeof targetUser.role === "string"
+      ? targetUser.role.split(",").map((role) => role.trim().toLowerCase())
+      : [];
+  if (targetRoles.includes("admin")) {
+    res.status(403).send({ message: "Admin accounts cannot be blocked." });
+    return;
+  }
+
+  const update = isBlocked
+    ? {
+        $set: {
+          isBlocked: true,
+          banned: true,
+          banReason: "Blocked by an administrator",
+          banExpires: null,
+        },
+      }
+    : {
+        $set: {
+          isBlocked: false,
+          banned: false,
+          banReason: null,
+          banExpires: null,
+        },
+      };
+
+  await users.updateOne({ _id: new ObjectId(id) }, update);
+
+  if (isBlocked) {
+    await sessions.deleteMany({ userId: targetUserId });
+  }
+
+  res.send({ success: true, userId: targetUserId, isBlocked });
 });
 
 app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
