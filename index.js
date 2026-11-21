@@ -156,7 +156,7 @@ app.post("/webhooks/stripe", async (req, res) => {
 
   const paymentRecord = {
     sessionId: checkoutSession.id,
-    status: checkoutSession.status,
+    status: "paid",
     customer_email:
       checkoutSession.customer_details?.email ?? checkoutSession.customer_email,
     userId,
@@ -878,7 +878,28 @@ app.patch(
     const isAdmin = req.user.role?.toLowerCase() === "admin";
 
     if (isAdmin) {
-      if (status === "Cancelled") {
+      const booking = await bookings.findOne(query);
+      if (!booking) {
+        res.status(404).send({ message: "Booking not found" });
+        return;
+      }
+
+      if (status === "Confirmed") {
+        if (booking.status !== "Pending") {
+          res
+            .status(400)
+            .send({ message: "Only pending appointments can be confirmed" });
+          return;
+        }
+        query.status = "Pending";
+      } else {
+        if (booking.status !== "Pending" && booking.status !== "Confirmed") {
+          res
+            .status(400)
+            .send({ message: "This appointment is already cancelled" });
+          return;
+        }
+        query.status = { $in: ["Pending", "Confirmed"] };
         fieldsToUpdate.cancelledBy = "admin";
       }
     } else {
