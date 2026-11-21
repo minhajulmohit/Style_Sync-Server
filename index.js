@@ -315,6 +315,11 @@ app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
   res.send(result);
 });
 
+app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
+  const result = await payments.find({}).sort({ payment_date: -1 }).toArray();
+  res.send(result);
+});
+
 app.get("/users/:id/premium", verifyToken, async (req, res) => {
   const id = req.params.id;
   if (!ObjectId.isValid(id)) {
