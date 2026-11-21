@@ -888,8 +888,44 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
     return res.status(404).send({ success: false, message: "Appointment not found" });
   }
 
-  // Paid শুধু webhook করবে। এখানে শুধু জানাচ্ছি।
-  res.send({ success: true, bookingId, paid: booking.paymentStatus === "Paid" });
+  const paymentRecord = {
+    sessionId: session.id,
+    status: session.status,
+    customer_email: session.customer_details?.email ?? session.customer_email,
+    userId,
+    payment_intent:
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent?.id,
+    payment_status: session.payment_status,
+    amount_total: session.amount_total,
+    currency: session.currency,
+    payment_date: new Date(),
+    bookingId,
+    serviceName: booking.serviceName,
+    appointmentDate: booking.date
+      ? `${booking.date} · ${booking.time}`
+      : undefined,
+  };
+
+  try {
+    await payments.updateOne(
+      { sessionId: session.id },
+      { $setOnInsert: paymentRecord },
+      { upsert: true },
+    );
+  } catch (error) {
+    if (error?.code !== 11000) {
+      throw error;
+    }
+  }
+
+  await bookings.updateOne(
+    { _id: new ObjectId(bookingId), userId },
+    { $set: { paymentStatus: "Paid" } },
+  );
+
+  res.send({ success: true, bookingId, paid: true });
 });
 
 // reviews api
