@@ -20,6 +20,7 @@ Set these in a local `.env` file. Do not commit credentials.
 | Variable | Purpose |
 | --- | --- |
 | `MONGODB_URL` | MongoDB connection string |
+| `API_JWT_SECRET` | Shared HS256 signing secret (at least 32 bytes); set the same value in the client and server deployments |
 | `PORT` | Optional Express port; defaults to `8000` |
 | `STRIPE_SECRET_KEY` | Stripe API secret used for checkout verification |
 | `STRIPE_WEBHOOK_SECRET` | Stripe endpoint signing secret for `/webhooks/stripe` |
@@ -43,5 +44,7 @@ server's `/webhooks/stripe` endpoint. The webhook returns `503` until
 - `POST /payment/success-verify` — verify a Stripe Checkout return
 - `POST /webhooks/stripe` — verify Stripe webhook events
 
-Protected API routes require a Better Auth session token in the
-`Authorization: Bearer <token>` header.
+Protected API routes require a short-lived HS256 JWT in the
+`Authorization: Bearer <token>` header. The client signs this JWT after
+validating the user's Better Auth session; the API reloads the user from
+MongoDB on each request so current roles and blocked status take effect.

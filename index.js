@@ -3,6 +3,7 @@ import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import Stripe from "stripe";
+import jwt from "jsonwebtoken";
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -11,6 +12,13 @@ const stripe = process.env.STRIPE_SECRET_KEY
 const app = express();
 
 const port = process.env.PORT || 8000;
+const API_JWT_ISSUER = "stylesync-client";
+const API_JWT_AUDIENCE = "stylesync-server";
+const apiJwtSecret = process.env.API_JWT_SECRET;
+
+if (!apiJwtSecret || Buffer.byteLength(apiJwtSecret, "utf8") < 32) {
+  throw new Error("API_JWT_SECRET must be configured with at least 32 bytes.");
+}
 
 app.use(
   express.json({
@@ -224,27 +232,30 @@ const verifyToken = async (req, res, next) => {
       return;
     }
 
-    const session = await sessions.findOne({ token: match[1] });
-    if (!session) {
+    let payload;
+    try {
+      payload = jwt.verify(match[1], apiJwtSecret, {
+        algorithms: ["HS256"],
+        issuer: API_JWT_ISSUER,
+        audience: API_JWT_AUDIENCE,
+      });
+    } catch {
       res.status(401).send({ message: "Unauthorized" });
       return;
     }
 
-    const expiresAt = new Date(session.expiresAt).getTime();
-    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-      await sessions.deleteOne({ _id: session._id });
+    const hasJwtClaims =
+      typeof payload === "object" &&
+      payload !== null &&
+      typeof payload.sub === "string" &&
+      typeof payload.exp === "number";
+    const userId = hasJwtClaims ? payload.sub : undefined;
+    if (!hasJwtClaims || !ObjectId.isValid(userId)) {
       res.status(401).send({ message: "Unauthorized" });
       return;
     }
 
-    if (!ObjectId.isValid(session.userId)) {
-      res.status(401).send({ message: "Unauthorized" });
-      return;
-    }
-
-    const user = await users.findOne({
-      _id: new ObjectId(session.userId),
-    });
+    const user = await users.findOne({ _id: new ObjectId(userId) });
     if (!user) {
       res.status(401).send({ message: "Unauthorized" });
       return;
