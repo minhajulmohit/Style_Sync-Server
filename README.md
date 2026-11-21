@@ -25,8 +25,10 @@ Set these in a local `.env` file. Do not commit credentials.
 | `STRIPE_SECRET_KEY` | Stripe API secret used for checkout verification |
 | `STRIPE_WEBHOOK_SECRET` | Stripe endpoint signing secret for `/webhooks/stripe` |
 
-Configure Stripe to send `checkout.session.completed` events to the deployed
-server's `/webhooks/stripe` endpoint. The webhook returns `503` until
+Configure Stripe to send `checkout.session.completed` and
+`checkout.session.async_payment_succeeded` events to the deployed server's
+`/webhooks/stripe` endpoint. Configure the endpoint and its signing secret for
+each Stripe mode you use (test and live). The webhook returns `503` until
 `STRIPE_WEBHOOK_SECRET` is configured.
 
 ## Main API routes

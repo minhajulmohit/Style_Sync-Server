@@ -127,7 +127,10 @@ app.post("/webhooks/stripe", async (req, res) => {
     return;
   }
 
-  if (event.type !== "checkout.session.completed") {
+  if (
+    event.type !== "checkout.session.completed" &&
+    event.type !== "checkout.session.async_payment_succeeded"
+  ) {
     res.send({ received: true });
     return;
   }
@@ -986,44 +989,11 @@ app.post("/payment/success-verify", verifyToken, async (req, res) => {
       .send({ success: false, message: "Appointment not found" });
   }
 
-  const paymentRecord = {
-    sessionId: session.id,
-    status: session.status,
-    customer_email: session.customer_details?.email ?? session.customer_email,
-    userId,
-    payment_intent:
-      typeof session.payment_intent === "string"
-        ? session.payment_intent
-        : session.payment_intent?.id,
-    payment_status: session.payment_status,
-    amount_total: session.amount_total,
-    currency: session.currency,
-    payment_date: new Date(),
+  res.send({
+    success: true,
     bookingId,
-    serviceName: booking.serviceName,
-    appointmentDate: booking.date
-      ? `${booking.date} · ${booking.time}`
-      : undefined,
-  };
-
-  try {
-    await payments.updateOne(
-      { sessionId: session.id },
-      { $setOnInsert: paymentRecord },
-      { upsert: true },
-    );
-  } catch (error) {
-    if (error?.code !== 11000) {
-      throw error;
-    }
-  }
-
-  await bookings.updateOne(
-    { _id: new ObjectId(bookingId), userId },
-    { $set: { paymentStatus: "Paid" } },
-  );
-
-  res.send({ success: true, bookingId, paid: true });
+    paid: booking.paymentStatus === "Paid",
+  });
 });
 
 // reviews api
