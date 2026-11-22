@@ -39,7 +39,7 @@ export async function connectToMongoDB() {
   }
 }
 
-await connectToMongoDB();
+// await connectToMongoDB();
 
 const db = client.db("StyleSync");
 const services = db.collection("services");
