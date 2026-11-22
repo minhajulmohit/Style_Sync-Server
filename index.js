@@ -15,9 +15,7 @@ const betterAuthUrl = process.env.BETTER_AUTH_URL;
 if (!betterAuthUrl) {
   throw new Error("BETTER_AUTH_URL must be configured for JWT verification.");
 }
-const authJwks = createRemoteJWKSet(
-  new URL("/api/auth/jwks", betterAuthUrl),
-);
+const authJwks = createRemoteJWKSet(new URL("/api/auth/jwks", betterAuthUrl));
 
 app.use("/webhooks/stripe", express.raw({ type: "application/json" }));
 app.use(express.json());
@@ -38,7 +36,7 @@ export async function connectToMongoDB() {
   }
 }
 
-await connectToMongoDB();
+// await connectToMongoDB();
 
 const db = client.db("StyleSync");
 const services = db.collection("services");
