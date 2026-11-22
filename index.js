@@ -5,9 +5,7 @@ import { MongoClient, ObjectId } from "mongodb";
 import Stripe from "stripe";
 import jwt from "jsonwebtoken";
 
-const stripe = process.env.STRIPE_SECRET_KEY
-  ? new Stripe(process.env.STRIPE_SECRET_KEY)
-  : null;
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
@@ -39,7 +37,7 @@ export async function connectToMongoDB() {
   }
 }
 
-// await connectToMongoDB();
+await connectToMongoDB();
 
 const db = client.db("StyleSync");
 const services = db.collection("services");
@@ -64,11 +62,7 @@ app.post("/webhooks/stripe", async (req, res) => {
 
   let event;
   try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      signature,
-      webhookSecret,
-    );
+    event = stripe.webhooks.constructEvent(req.body, signature, webhookSecret);
   } catch (error) {
     console.error(
       "Stripe webhook signature verification failed:",
@@ -178,17 +172,20 @@ const isUserBlocked = (user) => {
 const verifyToken = async (req, res, next) => {
   try {
     const authorization = req.headers.authorization;
-    const match =
-      typeof authorization === "string" &&
-      authorization.match(/^Bearer\s+(\S+)$/i);
-    if (!match) {
+    if (!authorization || typeof authorization !== "string") {
+      res.status(401).send({ message: "Unauthorized" });
+      return;
+    }
+    const parts = authorization.split(" ");
+    const token = parts[1];
+    if (parts[0].toLowerCase() !== "bearer" || !token) {
       res.status(401).send({ message: "Unauthorized" });
       return;
     }
 
     let payload;
     try {
-      payload = jwt.verify(match[1], apiJwtSecret, {
+      payload = jwt.verify(token, apiJwtSecret, {
         algorithms: ["HS256"],
         issuer: API_JWT_ISSUER,
         audience: API_JWT_AUDIENCE,
@@ -198,13 +195,8 @@ const verifyToken = async (req, res, next) => {
       return;
     }
 
-    const hasJwtClaims =
-      typeof payload === "object" &&
-      payload !== null &&
-      typeof payload.sub === "string" &&
-      typeof payload.exp === "number";
-    const userId = hasJwtClaims ? payload.sub : undefined;
-    if (!hasJwtClaims || !ObjectId.isValid(userId)) {
+    const userId = payload?.sub;
+    if (!ObjectId.isValid(userId)) {
       res.status(401).send({ message: "Unauthorized" });
       return;
     }
@@ -226,6 +218,7 @@ const verifyToken = async (req, res, next) => {
     next(error);
   }
 };
+
 const isCustomerRole = (role) => role === "customer" || role === "user";
 const verifyCustomer = async (req, res, next) => {
   if (!isCustomerRole(req.user?.role?.toLowerCase())) {
@@ -329,29 +322,6 @@ app.patch("/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
 
 app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
   const result = await payments.find({}).sort({ payment_date: -1 }).toArray();
-  res.send(result);
-});
-
-app.get("/users/:id/premium", verifyToken, async (req, res) => {
-  const id = req.params.id;
-  if (!ObjectId.isValid(id)) {
-    res.status(400).send({ message: "Invalid user ID" });
-    return;
-  }
-  if (
-    getAuthenticatedUserId(req.user) !== new ObjectId(id).toString() &&
-    req.user.role?.toLowerCase() !== "admin"
-  ) {
-    res.status(403).send({ message: "Forbidden" });
-    return;
-  }
-
-  const query = { _id: new ObjectId(id) };
-  const result = await users.findOne(query, { projection: { premium: 1 } });
-  if (!result) {
-    res.status(404).send({ message: "User not found" });
-    return;
-  }
   res.send(result);
 });
 
@@ -726,52 +696,57 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
   }
 });
 
-app.get("/bookings/availability", async (req, res) => {
-  const { serviceId, date } = req.query;
+app.get(
+  "/bookings/availability",
+  verifyToken,
+  verifyCustomerOrAdmin,
+  async (req, res) => {
+    const { serviceId, date } = req.query;
 
-  if (
-    typeof serviceId !== "string" ||
-    !ObjectId.isValid(serviceId) ||
-    typeof date !== "string" ||
-    !isValidBookingDate(date)
-  ) {
-    res.status(400).send({ message: "Invalid service or date" });
-    return;
-  }
+    if (
+      typeof serviceId !== "string" ||
+      !ObjectId.isValid(serviceId) ||
+      typeof date !== "string" ||
+      !isValidBookingDate(date)
+    ) {
+      res.status(400).send({ message: "Invalid service or date" });
+      return;
+    }
 
-  const service = await services.findOne({ _id: new ObjectId(serviceId) });
-  if (!service || service.status !== "Active") {
-    res.status(404).send({ message: "Service not found or unavailable" });
-    return;
-  }
+    const service = await services.findOne({ _id: new ObjectId(serviceId) });
+    if (!service || service.status !== "Active") {
+      res.status(404).send({ message: "Service not found or unavailable" });
+      return;
+    }
 
-  const serviceDuration = Number(service.duration);
-  const bookingsForDate = await bookings
-    .find({
-      serviceId,
-      date,
-      status: { $in: ["Pending", "Confirmed"] },
-    })
-    .project({ _id: 0, time: 1, duration: 1 })
-    .toArray();
-  const bookedSlots = bookingsForDate
-    .map((booking) => ({
-      time: booking.time,
-      duration:
-        Number.isInteger(booking.duration) && booking.duration > 0
-          ? booking.duration
-          : serviceDuration,
-    }))
-    .filter(
-      (booking) =>
-        timeToMinutes(booking.time) !== null &&
-        Number.isInteger(booking.duration) &&
-        booking.duration > 0,
-    )
-    .sort((first, second) => first.time.localeCompare(second.time));
+    const serviceDuration = Number(service.duration);
+    const bookingsForDate = await bookings
+      .find({
+        serviceId,
+        date,
+        status: { $in: ["Pending", "Confirmed"] },
+      })
+      .project({ _id: 0, time: 1, duration: 1 })
+      .toArray();
+    const bookedSlots = bookingsForDate
+      .map((booking) => ({
+        time: booking.time,
+        duration:
+          Number.isInteger(booking.duration) && booking.duration > 0
+            ? booking.duration
+            : serviceDuration,
+      }))
+      .filter(
+        (booking) =>
+          timeToMinutes(booking.time) !== null &&
+          Number.isInteger(booking.duration) &&
+          booking.duration > 0,
+      )
+      .sort((first, second) => first.time.localeCompare(second.time));
 
-  res.send({ bookedSlots });
-});
+    res.send({ bookedSlots });
+  },
+);
 
 // বুকিং খোজা
 app.get("/bookings", verifyToken, verifyCustomerOrAdmin, async (req, res) => {
@@ -809,7 +784,7 @@ app.get("/bookings", verifyToken, verifyCustomerOrAdmin, async (req, res) => {
   res.send(result);
 });
 
-// কাস্টমার অনুযায়ী বুকিং খোজা
+// কাস্টমার অনুযায়ী বুকিং কাউন্ট খোজা
 app.get(
   "/bookings/count",
   verifyToken,
@@ -974,7 +949,7 @@ app.use((error, req, res, next) => {
 
 if (!process.env.VERCEL) {
   app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`);
+    console.log(`StyleSync app listening on port ${port}`);
   });
 }
 
