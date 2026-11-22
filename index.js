@@ -574,6 +574,8 @@ function timeToMinutes(time) {
   return match ? Number(match[1]) * 60 + Number(match[2]) : null;
 }
 
+const BANGLADESH_UTC_OFFSET = "+06:00";
+
 // বুক করা
 app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
   const { serviceId, date, time, message = "" } = req.body ?? {};
@@ -610,7 +612,9 @@ app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
     return;
   }
 
-  const slotDateTime = new Date(`${date}T${time}:00`);
+  const slotDateTime = new Date(
+    `${date}T${time}:00${BANGLADESH_UTC_OFFSET}`,
+  );
   if (
     Number.isNaN(slotDateTime.getTime()) ||
     slotDateTime.getTime() <= Date.now()
