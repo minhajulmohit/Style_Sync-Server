@@ -20,14 +20,14 @@ Backend API for the StyleSync salon booking platform.
 ![Node.js](https://img.shields.io/badge/Node.js-runtime-339933?logo=nodedotjs)
 ![Express.js 5](https://img.shields.io/badge/Express-5-000000?logo=express)
 ![MongoDB Native Driver](https://img.shields.io/badge/MongoDB-native_driver-47A248?logo=mongodb)
-![Better Auth Sessions](https://img.shields.io/badge/Better_Auth-shared_sessions-333333)
+![Better Auth JWT](https://img.shields.io/badge/Better_Auth-JWT%20%2B%20JWKS-333333)
 ![Stripe SDK](https://img.shields.io/badge/Stripe-SDK-635bff?logo=stripe)
 ![CORS](https://img.shields.io/badge/CORS-enabled-555555)
 ![Dotenv](https://img.shields.io/badge/Dotenv-configured-ECD53F)
 
 The API uses the MongoDB native driver, not Mongoose. Better Auth is configured
-in the client; this server verifies the client's short-lived JWTs and reads
-shared MongoDB user/session records.
+in the client; this server verifies its JWTs using the client's JWKS endpoint
+and reads shared MongoDB user/session records.
 
 ## Installation Instructions
 
@@ -63,7 +63,7 @@ The API listens on port `8000` by default. This repository does not define
 Required:
 
 - `MONGODB_URL`
-- `API_JWT_SECRET`
+- `BETTER_AUTH_URL` (the public base URL of the client that serves Better Auth)
 
 Optional or feature-dependent:
 

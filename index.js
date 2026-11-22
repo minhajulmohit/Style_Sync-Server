@@ -3,20 +3,21 @@ import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import Stripe from "stripe";
-import jwt from "jsonwebtoken";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 
 const port = process.env.PORT || 8000;
-const API_JWT_ISSUER = "stylesync-client";
-const API_JWT_AUDIENCE = "stylesync-server";
-const apiJwtSecret = process.env.API_JWT_SECRET;
+const betterAuthUrl = process.env.BETTER_AUTH_URL;
 
-if (!apiJwtSecret || Buffer.byteLength(apiJwtSecret, "utf8") < 32) {
-  throw new Error("API_JWT_SECRET must be configured with at least 32 bytes.");
+if (!betterAuthUrl) {
+  throw new Error("BETTER_AUTH_URL must be configured for JWT verification.");
 }
+const authJwks = createRemoteJWKSet(
+  new URL("/api/auth/jwks", betterAuthUrl),
+);
 
 app.use("/webhooks/stripe", express.raw({ type: "application/json" }));
 app.use(express.json());
@@ -172,31 +173,24 @@ const isUserBlocked = (user) => {
 const verifyToken = async (req, res, next) => {
   try {
     const authorization = req.headers.authorization;
-    if (!authorization || typeof authorization !== "string") {
-      res.status(401).send({ message: "Unauthorized" });
-      return;
-    }
-    const parts = authorization.split(" ");
-    const token = parts[1];
-    if (parts[0].toLowerCase() !== "bearer" || !token) {
+    const match =
+      typeof authorization === "string" &&
+      authorization.match(/^Bearer\s+(\S+)$/i);
+    if (!match) {
       res.status(401).send({ message: "Unauthorized" });
       return;
     }
 
     let payload;
     try {
-      payload = jwt.verify(token, apiJwtSecret, {
-        algorithms: ["HS256"],
-        issuer: API_JWT_ISSUER,
-        audience: API_JWT_AUDIENCE,
-      });
+      ({ payload } = await jwtVerify(match[1], authJwks));
     } catch {
       res.status(401).send({ message: "Unauthorized" });
       return;
     }
 
-    const userId = payload?.sub;
-    if (!ObjectId.isValid(userId)) {
+    const userId = payload.sub;
+    if (typeof userId !== "string" || !ObjectId.isValid(userId)) {
       res.status(401).send({ message: "Unauthorized" });
       return;
     }
